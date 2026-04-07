@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Body-Based Paint Drawing Tool</title>
+  <style>
+    :root {
+      --bg1: #f2ede4;
+      --bg2: #e6ddcf;
+      --ink: 30, 30, 30;
+      --panel: rgba(255,255,255,0.7);
+      --border: rgba(0,0,0,0.12);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      overflow: hidden;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background:
+        radial-gradient(circle at 20% 20%, rgba(255,255,255,0.35), transparent 35%),
+        radial-gradient(circle at 80% 70%, rgba(0,0,0,0.05), transparent 40%),
+        linear-gradient(135deg, var(--bg1), var(--bg2));
+      color: #1d1d1d;
+    }
+
+    #canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+      cursor: crosshair;
+      touch-action: none;
+    }
+
+    .hud {
+      position: fixed;
+      top: 16px;
+      left: 16px;
+      z-index: 10;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 14px 16px;
+      backdrop-filter: blur(10px);
+      box-shadow: 0 10px 30px rgba(0,0,0,0.08);
+      max-width: 340px;
+    }
+
+    .hud h1 {
+      font-size: 15px;
+      margin: 0 0 6px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+    }
+
+    .hud p {
+      margin: 0;
+      font-size: 12.5px;
+      line-height: 1.45;
+      opacity: 0.8;
+    }
+
+    .controls {
+      margin-top: 12px;
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    button {
+      border: 1px solid var(--border);
+      background: rgba(255,255,255,0.72);
+      border-radius: 999px;
+      padding: 8px 12px;
+      font-size: 12px;
+      cursor: pointer;
+      transition: transform 120ms ease, background 120ms ease;
+    }
+
+    button:hover {
+      transform: translateY(-1px);
+      background: rgba(255,255,255,0.9);
+    }
+
+    .legend {
+      position: fixed;
+      right: 16px;
+      bottom: 16px;
+      z-index: 10;
+      background: rgba(255,255,255,0.6);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 10px 12px;
+      font-size: 12px;
+      backdrop-filter: blur(10px);
+      line-height: 1.4;
+      box-shadow: 0 8px 20px rgba(0,0,0,0.06);
+    }
+
+    .swatch {
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      margin-right: 6px;
+      vertical-align: middle;
+      border: 1px solid rgba(0,0,0,0.1);
+    }
+  </style>
+</head>
+<body>
+  <div class="hud">
+    <h1>Body-Based Wet Paint Tool</h1>
+    <p>
+      Click and drag like a hand moving through diluted acrylic paint on the floor.
+      Faster movement stretches the paint into lighter smears. Slower movement leaves heavier,
+      denser traces. Marks slowly dry from glossy to matte while layers remain visible underneath.
+    </p>
+    <div class="controls">
+      <button id="clearBtn">Clear canvas</button>
+      <button id="toggleToneBtn">Switch tone</button>
+    </div>
+  </div>
+
+  <div class="legend">
+    <div><span class="swatch" style="background: rgba(35,35,35,0.85)"></span>slow drag = thicker paint</div>
+    <div><span class="swatch" style="background: rgba(35,35,35,0.35)"></span>fast drag = stretched paint</div>
+  </div>
+
+  <canvas id="canvas"></canvas>
+
+  <script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const clearBtn = document.getElementById('clearBtn');
+    const toggleToneBtn = document.getElementById('toggleToneBtn');
+
+    let width = 0;
+    let height = 0;
+    let dpr = Math.max(1, window.devicePixelRatio || 1);
+
+    const palette = [
+      { bg1: '#f2ede4', bg2: '#e6ddcf', pigment: [28, 28, 28] },
+      { bg1: '#efe5da', bg2: '#dcc7b4', pigment: [58, 38, 29] }
+    ];
+    let paletteIndex = 0;
+
+    const points = [];
+    const splats = [];
+    let pointerDown = false;
+    let lastX = 0;
+    let lastY = 0;
+    let lastTime = 0;
+    let hueShift = 0;
+
+    function setPalette() {
+      const p = palette[paletteIndex];
+      document.documentElement.style.setProperty('--bg1', p.bg1);
+      document.documentElement.style.setProperty('--bg2', p.bg2);
+    }
+
+    function resize() {
+      dpr = Math.max(1, window.devicePixelRatio || 1);
+      width = window.innerWidth;
+      height = window.innerHeight;
+      canvas.width = Math.floor(width * dpr);
+      canvas.height = Math.floor(height * dpr);
+      canvas.style.width = width + 'px';
+      canvas.style.height = height + 'px';
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+
+    class PaintStamp {
+      constructor(x, y, vx, vy, speed, pressure) {
+        this.x = x;
+        this.y = y;
+        this.vx = vx;
+        this.vy = vy;
+        this.speed = speed;
+        this.pressure = pressure;
+        this.age = 0;
+        this.dryness = 0;
+        this.life = 1200 + Math.random() * 800;
+        this.seed = Math.random() * Math.PI * 2;
+
+        const slowFactor = Math.max(0, 1 - speed / 24);
+        this.radius = 10 + pressure * 18 + slowFactor * 18 + Math.random() * 8;
+        this.opacity = 0.08 + pressure * 0.15 + slowFactor * 0.3;
+        this.stretch = 6 + speed * 0.75;
+        this.fingerCount = 3 + Math.floor(Math.random() * 3);
+      }
+
+      update() {
+        this.age += 1;
+        this.dryness = Math.min(1, this.age / this.life);
+      }
+
+      draw(ctx, pigment) {
+        const [r, g, b] = pigment;
+        const dir = Math.atan2(this.vy, this.vx || 0.0001);
+        const matteOpacity = this.opacity * (1 - this.dryness * 0.3);
+        const glossAlpha = (1 - this.dryness) * 0.12;
+
+        ctx.save();
+        ctx.translate(this.x, this.y);
+        ctx.rotate(dir);
+
+        for (let i = 0; i < this.fingerCount; i++) {
+          const offset = (i - (this.fingerCount - 1) / 2) * (this.radius * 0.28 + Math.random() * 2);
+          const lengthJitter = 0.75 + Math.random() * 0.45;
+          const thicknessJitter = 0.65 + Math.random() * 0.55;
+          const w = this.radius * thicknessJitter;
+          const h = Math.max(8, this.stretch * lengthJitter);
+
+          ctx.beginPath();
+          ctx.ellipse(
+            0,
+            offset,
+            h,
+            w * 0.42,
+            0,
+            0,
+            Math.PI * 2
+          );
+          ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${matteOpacity})`;
+          ctx.fill();
+        }
+
+        // Denser palm/forearm body
+        ctx.beginPath();
+        ctx.ellipse(-this.radius * 0.18, 0, this.radius * 0.9 + this.stretch * 0.1, this.radius * 0.55, 0, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${Math.min(0.85, matteOpacity + 0.08)})`;
+        ctx.fill();
+
+        // Uneven edge noise
+        for (let i = 0; i < 8; i++) {
+          const ex = (Math.random() - 0.5) * this.radius * 1.8;
+          const ey = (Math.random() - 0.5) * this.radius * 1.3;
+          const er = Math.random() * this.radius * 0.18;
+          ctx.beginPath();
+          ctx.arc(ex, ey, er, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${matteOpacity * 0.55})`;
+          ctx.fill();
+        }
+
+        // Glossy wet highlight while fresh
+        if (glossAlpha > 0.005) {
+          const grad = ctx.createLinearGradient(-this.stretch * 0.6, -this.radius, this.stretch * 0.6, this.radius);
+          grad.addColorStop(0, `rgba(255,255,255,0)`);
+          grad.addColorStop(0.4, `rgba(255,255,255,${glossAlpha})`);
+          grad.addColorStop(1, `rgba(255,255,255,0)`);
+          ctx.beginPath();
+          ctx.ellipse(0, -this.radius * 0.12, this.stretch * 0.7, this.radius * 0.35, 0, 0, Math.PI * 2);
+          ctx.fillStyle = grad;
+          ctx.fill();
+        }
+
+        ctx.restore();
+      }
+    }
+
+    class Splat {
+      constructor(x, y, radius, opacity) {
+        this.x = x;
+        this.y = y;
+        this.radius = radius;
+        this.opacity = opacity;
+        this.age = 0;
+        this.life = 900 + Math.random() * 600;
+      }
+
+      update() {
+        this.age += 1;
+      }
+
+      draw(ctx, pigment) {
+        const [r, g, b] = pigment;
+        const dryness = Math.min(1, this.age / this.life);
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${this.opacity * (1 - dryness * 0.25)})`;
+        ctx.fill();
+
+        if (dryness < 1) {
+          ctx.beginPath();
+          ctx.arc(this.x - this.radius * 0.2, this.y - this.radius * 0.2, this.radius * 0.55, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(255,255,255,${0.08 * (1 - dryness)})`;
+          ctx.fill();
+        }
+        ctx.restore();
+      }
+    }
+
+    function addPaint(x, y, dx, dy, dt) {
+      const distance = Math.hypot(dx, dy);
+      const speed = distance / Math.max(dt, 1) * 16;
+      const pressure = Math.max(0.08, Math.min(1, distance / 18));
+      const count = Math.max(1, Math.ceil(distance / 4));
+
+      for (let i = 0; i < count; i++) {
+        const t = count === 1 ? 1 : i / (count - 1);
+        const px = x - dx + dx * t + (Math.random() - 0.5) * 1.6;
+        const py = y - dy + dy * t + (Math.random() - 0.5) * 1.6;
+        const jitterVX = dx + (Math.random() - 0.5) * 2;
+        const jitterVY = dy + (Math.random() - 0.5) * 2;
+        points.push(new PaintStamp(px, py, jitterVX, jitterVY, speed, pressure));
+
+        if (Math.random() < 0.12 && speed < 10) {
+          splats.push(new Splat(
+            px + (Math.random() - 0.5) * 14,
+            py + (Math.random() - 0.5) * 14,
+            1.8 + Math.random() * 3.5,
+            0.05 + Math.random() * 0.08
+          ));
+        }
+      }
+    }
+
+    function drawBackgroundTexture() {
+      ctx.save();
+      for (let i = 0; i < 200; i++) {
+        const x = Math.random() * width;
+        const y = Math.random() * height;
+        const a = 0.015 + Math.random() * 0.02;
+        const size = 6 + Math.random() * 18;
+        ctx.beginPath();
+        ctx.ellipse(x, y, size, size * (0.35 + Math.random() * 0.4), Math.random() * Math.PI, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(0,0,0,${a})`;
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+
+    function render() {
+      ctx.clearRect(0, 0, width, height);
+      drawBackgroundTexture();
+
+      const pigment = palette[paletteIndex].pigment;
+
+      for (let i = 0; i < splats.length; i++) {
+        splats[i].update();
+        splats[i].draw(ctx, pigment);
+      }
+
+      for (let i = 0; i < points.length; i++) {
+        points[i].update();
+        points[i].draw(ctx, pigment);
+      }
+
+      // keep layers permanently visible but stop arrays from growing forever
+      if (points.length > 9000) points.splice(0, points.length - 9000);
+      if (splats.length > 2000) splats.splice(0, splats.length - 2000);
+
+      requestAnimationFrame(render);
+    }
+
+    function getPos(e) {
+      if (e.touches && e.touches.length > 0) {
+        return { x: e.touches[0].clientX, y: e.touches[0].clientY };
+      }
+      return { x: e.clientX, y: e.clientY };
+    }
+
+    function startDraw(e) {
+      e.preventDefault();
+      const pos = getPos(e);
+      pointerDown = true;
+      lastX = pos.x;
+      lastY = pos.y;
+      lastTime = performance.now();
+      // Initial contact patch
+      splats.push(new Splat(pos.x, pos.y, 5 + Math.random() * 5, 0.08));
+    }
+
+    function moveDraw(e) {
+      if (!pointerDown) return;
+      e.preventDefault();
+      const pos = getPos(e);
+      const now = performance.now();
+      const dx = pos.x - lastX;
+      const dy = pos.y - lastY;
+      const dt = now - lastTime;
+      addPaint(pos.x, pos.y, dx, dy, dt);
+      lastX = pos.x;
+      lastY = pos.y;
+      lastTime = now;
+    }
+
+    function endDraw() {
+      pointerDown = false;
+    }
+
+    clearBtn.addEventListener('click', () => {
+      points.length = 0;
+      splats.length = 0;
+    });
+
+    toggleToneBtn.addEventListener('click', () => {
+      paletteIndex = (paletteIndex + 1) % palette.length;
+      setPalette();
+    });
+
+    window.addEventListener('resize', resize);
+    canvas.addEventListener('mousedown', startDraw);
+    canvas.addEventListener('mousemove', moveDraw);
+    window.addEventListener('mouseup', endDraw);
+    canvas.addEventListener('mouseleave', endDraw);
+
+    canvas.addEventListener('touchstart', startDraw, { passive: false });
+    canvas.addEventListener('touchmove', moveDraw, { passive: false });
+    window.addEventListener('touchend', endDraw);
+
+    setPalette();
+    resize();
+    render();
+  </script>
+</body>
+</html>
